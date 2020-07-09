@@ -750,3 +750,9 @@ resource "aws_s3_bucket" "s3" {
     Environment = "Dev"
   }
 }
+#cloudwatch agent policy
+
+resource "aws_iam_role_policy_attachment" "CloudWatchAgentServerPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  role       = "${aws_iam_role.CodeDeployEC2ServiceRole.name}"
+}
