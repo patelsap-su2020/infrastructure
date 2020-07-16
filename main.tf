@@ -219,25 +219,25 @@ resource "aws_db_instance" "RDS" {
 
 
 #EC2
-resource "aws_instance" "web" {
-  ami           = "${var.ami}"
-  instance_type = "t2.micro"
-  subnet_id = "${aws_subnet.subnet-2.id}"
-  vpc_security_group_ids = ["${aws_security_group.security_grp.id}"]
-  iam_instance_profile   = "CodeDeployEC2ServiceRole"
-  key_name = "${var.key_name}"
+# resource "aws_instance" "web" {
+#   ami           = "${var.ami}"
+#   instance_type = "t2.micro"
+#   subnet_id = "${aws_subnet.subnet-2.id}"
+#   vpc_security_group_ids = ["${aws_security_group.security_grp.id}"]
+#   iam_instance_profile   = "CodeDeployEC2ServiceRole"
+#   key_name = "${var.key_name}"
 
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp2"
-  }
+#   root_block_device {
+#     volume_size = 20
+#     volume_type = "gp2"
+#   }
 
-  user_data = "${data.template_file.data.rendered}"
+#   user_data = "${data.template_file.data.rendered}"
 
-  tags = {
-    Name = "Demo Instance"
-  }
-}
+#   tags = {
+#     Name = "Demo Instance"
+#   }
+# }
 
 #DynamoDB
 resource "aws_dynamodb_table" "dbTable" {
@@ -373,6 +373,7 @@ resource "aws_iam_instance_profile" "EC2Profile" {
 resource "aws_s3_bucket" "b" {
   bucket        = "${var.bucket_name}"
   force_destroy = true
+  acl           = "private"
 
   server_side_encryption_configuration {
     rule {
@@ -720,6 +721,19 @@ resource "aws_codedeploy_deployment_group" "csye6225-webapp-deployment" {
       type  = "KEY_AND_VALUE"
       value = "Demo Instance"
     } 
+
+    load_balancer_info {
+    target_group_pair_info {
+      prod_traffic_route {
+        listener_arns = ["${aws_lb_listener.front_end.arn}"]
+      }
+    
+
+      target_group {
+        name = "${aws_lb_target_group.target_grp.name}"
+      }
+    }
+  }
 }
 
 #s3 bucket for code deploy
@@ -750,9 +764,166 @@ resource "aws_s3_bucket" "s3" {
     Environment = "Dev"
   }
 }
+
+
 #cloudwatch agent policy
 
 resource "aws_iam_role_policy_attachment" "CloudWatchAgentServerPolicy" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
   role       = "${aws_iam_role.CodeDeployEC2ServiceRole.name}"
+}
+
+#auto-scalling
+
+resource "aws_launch_configuration" "as_conf" {
+  name   = "terraform-lc-example-"
+  image_id      = "${var.ami}"
+  instance_type = "t2.micro"
+  iam_instance_profile   = "CodeDeployEC2ServiceRole"
+  key_name = "${var.key_name}" 
+  security_groups = ["${aws_security_group.security_grp.id}"]
+  associate_public_ip_address = true
+  user_data = "${data.template_file.data.rendered}"
+ 
+}
+
+resource "aws_autoscaling_group" "bar" {
+  name                 = "bar"
+  launch_configuration = "${aws_launch_configuration.as_conf.name}"
+  desired_capacity     = 2
+  min_size               = 2
+  max_size               = 5
+  default_cooldown     = 60
+  health_check_type = "EC2"
+  vpc_zone_identifier = ["${aws_subnet.subnet-2.id}","${aws_subnet.subnet-3.id}"]
+  target_group_arns = ["${aws_lb_target_group.target_grp.arn}"]
+
+
+  tag {
+    key                 = "Name"
+    value               = "Demo Instance"
+    propagate_at_launch = true
+  }
+
+  }
+#autoscaling policy up
+  resource "aws_autoscaling_policy" "auto_policy" {
+  name                   = "auto_policy"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 60
+  autoscaling_group_name = "${aws_autoscaling_group.bar.name}"
+  
+}
+
+
+resource "aws_cloudwatch_metric_alarm" "bat" {
+  alarm_name          = "alarm"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "60"
+  statistic           = "Average"
+  threshold           = "5"
+
+  dimensions = {
+    AutoScalingGroupName = "${aws_autoscaling_group.bar.name}"
+  }
+
+  alarm_description = "This metric monitors ec2 cpu utilization"
+  alarm_actions     = ["${aws_autoscaling_policy.auto_policy.arn}"]
+}
+
+#autoscalling policy down
+resource "aws_autoscaling_policy" "auto_policy_down" {
+  name                   = "auto_policy_down"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 60
+  autoscaling_group_name = "${aws_autoscaling_group.bar.name}"
+  
+}
+
+
+resource "aws_cloudwatch_metric_alarm" "down" {
+  alarm_name          = "alarm_down"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "60"
+  statistic           = "Average"
+  threshold           = "3"
+
+  dimensions = {
+    AutoScalingGroupName = "${aws_autoscaling_group.bar.name}"
+  }
+
+  alarm_description = "This metric monitors ec2 cpu utilization"
+  alarm_actions     = ["${aws_autoscaling_policy.auto_policy_down.arn}"]
+}
+
+
+
+#load balancer
+resource "aws_lb" "test" {
+  name               = "test-lb-tf"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = ["${aws_subnet.subnet-2.id}","${aws_subnet.subnet-3.id}","${aws_subnet.subnet.id}"]
+  security_groups =  ["${aws_security_group.security_grp.id}"]
+  enable_deletion_protection = false
+
+  access_logs {
+    bucket  = "${var.bucket_name}"
+  }
+
+}
+
+resource "aws_lb_target_group" "target_grp" {
+  name        = "target-grp"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = "${aws_vpc.aws_demo.id}"
+ 
+   stickiness {
+     type = "lb_cookie"
+     enabled = true
+ }
+}
+
+
+
+# resource "aws_lb_target_group_attachment" "target_grp_attachment" {
+#   target_group_arn = "${aws_lb_target_group.target_grp.arn}"
+#   target_id        = "${aws_instance.web.id}"
+# }
+
+
+resource "aws_lb_listener" "front_end" {
+  load_balancer_arn = "${aws_lb.test.arn}"
+  port              = "80"
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = "${aws_lb_target_group.target_grp.arn}"
+  }
+}
+
+
+
+# route53
+
+
+resource "aws_route53_record" "www" {
+  zone_id = "Z07438731RE8566V59DFV"
+  name    = ""
+  type    = "A"
+
+  alias {
+    name                   = "${aws_lb.test.dns_name}"
+    zone_id                = "${aws_lb.test.zone_id}"
+    evaluate_target_health = true
+  }
 }
