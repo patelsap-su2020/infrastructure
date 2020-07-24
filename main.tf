@@ -250,6 +250,10 @@ resource "aws_dynamodb_table" "dbTable" {
     name = "id"
     type = "S"
   }
+  ttl {
+    attribute_name = "TimeToExist"
+    enabled        = true
+  }
 
 }
 
@@ -355,7 +359,7 @@ resource "aws_iam_policy" "policy" {
 		]
 	}]
 }
-  EOF
+EOF
 
 }
 
@@ -488,7 +492,9 @@ resource "aws_iam_policy" "CircleCI-Code-Deploy" {
       ],
       "Resource": [
         "arn:aws:codedeploy:us-east-1:478806934556:application:csye6225_webapp",
-        "arn:aws:codedeploy:us-east-1:478806934556:deploymentgroup:csye6225_webapp/csye6225-webapp-deployment"
+        "arn:aws:codedeploy:us-east-1:478806934556:deploymentgroup:csye6225_webapp/csye6225-webapp-deployment",
+        "arn:aws:codedeploy:us-east-1:478806934556:application:lambda_webapp",
+        "arn:aws:codedeploy:us-east-1:478806934556:deploymentgroup:lambda_webapp/lambda-webapp-deployment"
       ]
     },
     {
@@ -509,7 +515,8 @@ resource "aws_iam_policy" "CircleCI-Code-Deploy" {
       "Resource": [
         "arn:aws:codedeploy:us-east-1:478806934556:deploymentconfig:CodeDeployDefault.OneAtATime",
         "arn:aws:codedeploy:us-east-1:478806934556:deploymentconfig:CodeDeployDefault.HalfAtATime",
-        "arn:aws:codedeploy:us-east-1:478806934556:deploymentconfig:CodeDeployDefault.AllAtOnce"
+        "arn:aws:codedeploy:us-east-1:478806934556:deploymentconfig:CodeDeployDefault.AllAtOnce",
+        "arn:aws:codedeploy:us-east-1:478806934556:deploymentconfig:test-deployment-config"
       ]
     }
   ]
@@ -593,7 +600,10 @@ resource "aws_iam_role" "CodeDeployEC2ServiceRole" {
       "Sid": "",
       "Effect": "Allow",
       "Principal": {
-        "Service": "ec2.amazonaws.com"
+        "Service": [
+            "ec2.amazonaws.com",
+            "lambda.amazonaws.com"
+        ]
       },
       "Action": "sts:AssumeRole"
     }
@@ -697,15 +707,19 @@ resource "aws_iam_role_policy_attachment" "AWSCodeDeployRole" {
   role       = "${aws_iam_role.CodeDeployServiceRole.name}"
 }
 
-resource "aws_sns_topic" "sns_topic" {
-  name = "example-topic"
+resource "aws_iam_role_policy_attachment" "AWSCodeDeployRoleForLambda" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForLambda"
+  role       = "${aws_iam_role.CodeDeployServiceRole.name}"
 }
+
+
 
 resource "aws_codedeploy_deployment_group" "csye6225-webapp-deployment" {
   app_name              = "${aws_codedeploy_app.csye6225_webapp.name}"
   deployment_group_name = "csye6225-webapp-deployment"
   service_role_arn      = "${aws_iam_role.CodeDeployServiceRole.arn}"
    deployment_config_name = "CodeDeployDefault.AllAtOnce"
+   autoscaling_groups = ["${aws_autoscaling_group.bar.id}"]
 
   deployment_style {
     deployment_type   = "IN_PLACE"
@@ -818,14 +832,14 @@ resource "aws_autoscaling_group" "bar" {
 
 
 resource "aws_cloudwatch_metric_alarm" "bat" {
-  alarm_name          = "alarm"
+  alarm_name          = "alarm_up"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "2"
   metric_name         = "CPUUtilization"
   namespace           = "AWS/EC2"
   period              = "60"
   statistic           = "Average"
-  threshold           = "5"
+  threshold           = "90"
 
   dimensions = {
     AutoScalingGroupName = "${aws_autoscaling_group.bar.name}"
@@ -926,4 +940,212 @@ resource "aws_route53_record" "www" {
     zone_id                = "${aws_lb.test.zone_id}"
     evaluate_target_health = true
   }
+}
+
+
+#lambda function policy
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromSNS"
+  action        = "lambda:InvokeFunction"
+  function_name = "${aws_lambda_function.test_lambda.function_name}"
+  principal     = "sns.amazonaws.com"
+  source_arn    = "${aws_sns_topic.sns_topic.arn}"
+  # qualifier     = "${aws_lambda_alias.test_alias.name}"
+}
+
+
+resource "aws_lambda_function" "test_lambda" {
+  # s3_bucket = "${aws_s3_bucket.s3.bucket}"
+  # s3_key = "webapp.zip"
+  filename      = "lambda.zip"
+  function_name = "lambda_function"
+  role          = "${aws_iam_role.iam_for_lambda.arn}"
+  handler       = "Handler.lambda_handler"
+  runtime       = "python3.8"
+  # source_code_hash = "${base64sha256(file("webapp(10).zip"))}
+  # memory_size = 256
+  # timeout= 180
+  # reserved_concurrent_executions = 5
+
+  environment {
+    variables = {
+      DOMAIN_NAME = "prod.sapnapatel.me"
+      table = "${aws_dynamodb_table.dbTable.name}"
+    }
+  }
+
+  tags= {
+    Name = "Lambda Email"
+  }
+
+}
+
+
+
+#lambda role policy
+
+resource "aws_iam_role" "iam_for_lambda" {
+  name = "iam_for_lambda"
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+EOF
+}
+
+
+
+
+
+# resource "aws_iam_policy" "policy_lambda" {
+#   name   = "policy_lambda"
+#   policy = <<EOF
+# {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#     {
+#       "Action": "sts:AssumeRole",
+#       "Principal": {
+#         "Service": "lambda.amazonaws.com"
+#       },
+#       "Effect": "Allow",
+#       "Sid": ""
+#     }
+#   ]
+# }
+# EOF
+# }
+
+# resource "aws_iam_role_policy_attachment" "lambda_logs" {
+#   role       = "${aws_iam_role.CodeDeployEC2ServiceRole.name}"
+#   policy_arn = "${aws_iam_policy.policy_lambda.arn}"
+# }
+
+#codedeploy for lambda
+
+resource "aws_codedeploy_app" "lambda_webapp" {
+  compute_platform = "Lambda"
+  name             = "lambda_webapp"
+}
+
+
+#codedeploy config for lambda
+resource "aws_codedeploy_deployment_config" "foo" {
+  deployment_config_name = "test-deployment-config"
+  compute_platform       = "Lambda"
+
+  traffic_routing_config {
+    type = "AllAtOnce"
+  }
+}
+
+
+resource "aws_codedeploy_deployment_group" "lambda-webapp-deployment" {
+  app_name              = "${aws_codedeploy_app.lambda_webapp.name}"
+  deployment_group_name = "lambda-webapp-deployment"
+  service_role_arn      = "${aws_iam_role.CodeDeployServiceRole.arn}"
+   deployment_config_name = "${aws_codedeploy_deployment_config.foo.id}"
+  #  autoscaling_groups = ["${aws_autoscaling_group.bar.id}"]
+
+  deployment_style {
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+    deployment_type   = "BLUE_GREEN"
+  }
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_STOP_ON_ALARM"]
+  }
+
+  # #  ec2_tag_filter {
+  # #     key   = "Name"
+  # #     type  = "KEY_AND_VALUE"
+  # #     value = "Demo Instance"
+  # #   } 
+
+  # #   load_balancer_info {
+  # #   target_group_pair_info {
+  # #     prod_traffic_route {
+  # #       listener_arns = ["${aws_lb_listener.front_end.arn}"]
+  # #     }
+    
+
+  # #     target_group {
+  # #       name = "${aws_lb_target_group.target_grp.name}"
+  # #     }
+  #   }
+  # }
+}
+
+
+#sns-topic
+resource "aws_sns_topic" "sns_topic" {
+  name = "example-topic"
+}
+
+#SNS subscription
+resource "aws_sns_topic_subscription" "user_updates_sqs_target" {
+  topic_arn = "${aws_sns_topic.sns_topic.arn}"
+  protocol  = "lambda"
+  endpoint  = "${aws_lambda_function.test_lambda.arn}"
+}
+
+#lambda policy attach to circleci
+
+resource "aws_iam_policy" "update_policy" {
+  name = "update_policy"
+
+  policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "VisualEditor0",
+            "Effect": "Allow",
+            "Action": "lambda:UpdateFunctionCode",
+            "Resource": "*"
+        }
+    ]
+}
+EOF
+}
+
+resource "aws_iam_user_policy_attachment" "update_policy_attach" {
+  user       = "circleci"
+  policy_arn = "${aws_iam_policy.update_policy.arn}"
+}
+
+#dynamoDB access to lambda
+resource "aws_iam_role_policy_attachment" "dynamoDbAccess" {
+  policy_arn = "arn:aws:iam::478806934556:policy/dynamoDbAccess"
+  role       = "${aws_iam_role.iam_for_lambda.name}"
+}
+
+#AWSLambdaExcecution
+resource "aws_iam_role_policy_attachment" "AWSLambdaBasicExecutionRolepolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  role       = "${aws_iam_role.iam_for_lambda.name}"
+}
+
+#SESLambdapolicy
+resource "aws_iam_role_policy_attachment" "SESLambdapolicy" {
+  policy_arn = "arn:aws:iam::478806934556:policy/SESLambdapolicy"
+  role       = "${aws_iam_role.iam_for_lambda.name}"
+}
+
+#codedeployEc2ServiceRole SNS policy
+resource "aws_iam_role_policy_attachment" "SNSpolicy" {
+  policy_arn = "arn:aws:iam::478806934556:policy/SNSpolicy"
+  role       = "${aws_iam_role.CodeDeployEC2ServiceRole.name}"
 }
