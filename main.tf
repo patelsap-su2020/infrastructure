@@ -113,7 +113,7 @@ resource "aws_route_table_association" "c" {
 
 # security grp
 resource "aws_security_group" "security_grp" {
-  name        = "security_grp"
+  name        = "application_security grp"
   description = "my security grp"
   vpc_id      = "${aws_vpc.aws_demo.id}"
 
@@ -130,13 +130,48 @@ resource "aws_security_group" "security_grp" {
     from_port   = 80
     to_port     = 80
     protocol    = "TCP"
-    cidr_blocks = ["0.0.0.0/0"]
+    security_groups = ["${aws_security_group.loadbalacer_grp.id}"]
   }
 
   ingress {
     description = "Custom TCP Rule"
     from_port   = 8080
     to_port     = 8080
+    protocol    = "TCP"
+    security_groups = ["${aws_security_group.loadbalacer_grp.id}"]
+  }
+
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "TCP"
+    security_groups = ["${aws_security_group.loadbalacer_grp.id}"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  
+
+  tags = {
+    Name = "application_security grp"
+  }
+}
+
+#load balacer security grp
+resource "aws_security_group" "loadbalacer_grp" {
+  name        = "load_security_grp"
+  description = "my security grp"
+  vpc_id      = "${aws_vpc.aws_demo.id}"
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
     protocol    = "TCP"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -149,6 +184,14 @@ resource "aws_security_group" "security_grp" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Custom TCP Rule"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "TCP"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -157,9 +200,10 @@ resource "aws_security_group" "security_grp" {
   }
 
   tags = {
-    Name = "security grp"
+    Name = "load_security grp"
   }
 }
+
 
 
 
@@ -185,7 +229,7 @@ resource "aws_security_group" "database" {
   }
 
   tags = {
-    Name = "db_security_grp"
+    Name = "database_security_grp"
   }
 
 }
@@ -215,8 +259,23 @@ resource "aws_db_instance" "RDS" {
   vpc_security_group_ids = ["${aws_security_group.database.id}"]
   db_subnet_group_name = "database_group"
   skip_final_snapshot = true
+  storage_encrypted = true
+  parameter_group_name = "${aws_db_parameter_group.parameter_group.name}"
+  
 }
 
+# parameter group
+resource "aws_db_parameter_group" "parameter_group" {
+  name   = "rds-pg"
+  family = "mysql5.7"
+
+  parameter {
+    name  = "performance_schema"
+    value = "1"
+    apply_method = "pending-reboot"
+  }
+
+}
 
 #EC2
 # resource "aws_instance" "web" {
@@ -886,9 +945,9 @@ resource "aws_lb" "test" {
   internal           = false
   load_balancer_type = "application"
   subnets            = ["${aws_subnet.subnet-2.id}","${aws_subnet.subnet-3.id}","${aws_subnet.subnet.id}"]
-  security_groups =  ["${aws_security_group.security_grp.id}"]
+  security_groups =  ["${aws_security_group.loadbalacer_grp.id}"]
   enable_deletion_protection = false
-
+  
   access_logs {
     bucket  = "${var.bucket_name}"
   }
@@ -917,15 +976,32 @@ resource "aws_lb_target_group" "target_grp" {
 
 resource "aws_lb_listener" "front_end" {
   load_balancer_arn = "${aws_lb.test.arn}"
-  port              = "80"
-  protocol          = "HTTP"
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = "arn:aws:acm:us-east-1:478806934556:certificate/3d7f2fd4-f845-4b0f-a533-21e9de0d79bd"
+
   default_action {
     type             = "forward"
     target_group_arn = "${aws_lb_target_group.target_grp.arn}"
   }
 }
 
+resource "aws_lb_listener" "redirect_end" {
+  load_balancer_arn = "${aws_lb.test.arn}"
+  port              = "80"
+  protocol          = "HTTP"
 
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
 
 # route53
 
@@ -1034,39 +1110,39 @@ EOF
 
 #codedeploy for lambda
 
-resource "aws_codedeploy_app" "lambda_webapp" {
-  compute_platform = "Lambda"
-  name             = "lambda_webapp"
-}
+# resource "aws_codedeploy_app" "lambda_webapp" {
+#   compute_platform = "Lambda"
+#   name             = "lambda_webapp"
+# }
 
 
-#codedeploy config for lambda
-resource "aws_codedeploy_deployment_config" "foo" {
-  deployment_config_name = "test-deployment-config"
-  compute_platform       = "Lambda"
+# #codedeploy config for lambda
+# resource "aws_codedeploy_deployment_config" "foo" {
+#   deployment_config_name = "test-deployment-config"
+#   compute_platform       = "Lambda"
 
-  traffic_routing_config {
-    type = "AllAtOnce"
-  }
-}
+#   traffic_routing_config {
+#     type = "AllAtOnce"
+#   }
+# }
 
 
-resource "aws_codedeploy_deployment_group" "lambda-webapp-deployment" {
-  app_name              = "${aws_codedeploy_app.lambda_webapp.name}"
-  deployment_group_name = "lambda-webapp-deployment"
-  service_role_arn      = "${aws_iam_role.CodeDeployServiceRole.arn}"
-   deployment_config_name = "${aws_codedeploy_deployment_config.foo.id}"
-  #  autoscaling_groups = ["${aws_autoscaling_group.bar.id}"]
+# resource "aws_codedeploy_deployment_group" "lambda-webapp-deployment" {
+#   app_name              = "${aws_codedeploy_app.lambda_webapp.name}"
+#   deployment_group_name = "lambda-webapp-deployment"
+#   service_role_arn      = "${aws_iam_role.CodeDeployServiceRole.arn}"
+#    deployment_config_name = "${aws_codedeploy_deployment_config.foo.id}"
+#   #  autoscaling_groups = ["${aws_autoscaling_group.bar.id}"]
 
-  deployment_style {
-    deployment_option = "WITH_TRAFFIC_CONTROL"
-    deployment_type   = "BLUE_GREEN"
-  }
+#   deployment_style {
+#     deployment_option = "WITH_TRAFFIC_CONTROL"
+#     deployment_type   = "BLUE_GREEN"
+#   }
 
-  auto_rollback_configuration {
-    enabled = true
-    events  = ["DEPLOYMENT_STOP_ON_ALARM"]
-  }
+#   auto_rollback_configuration {
+#     enabled = true
+#     events  = ["DEPLOYMENT_STOP_ON_ALARM"]
+#   }
 
   # #  ec2_tag_filter {
   # #     key   = "Name"
@@ -1086,7 +1162,7 @@ resource "aws_codedeploy_deployment_group" "lambda-webapp-deployment" {
   # #     }
   #   }
   # }
-}
+# }
 
 
 #sns-topic
